@@ -10,7 +10,13 @@ def getOrderBook(symbol, limit):
     response = requests.get(f'https://api.binance.com/api/v3/depth?symbol={symbol}&limit={limit}')
     return response.json()
 
-def sum_quantities(bids, asks, bucket_size):
+def getPriceOfAssetAdjustedForBucketSize(symbol, bucket_size):
+    response = requests.get(f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}')
+    response = response.json()
+    price = int(float(response["price"]) / bucket_size) * bucket_size
+    return price
+
+def sumQuantities(bids, asks, bucket_size):
     # Create empty dictionaries for bids and asks
     bid_buckets = {}
     ask_buckets = {}
@@ -40,13 +46,31 @@ def sum_quantities(bids, asks, bucket_size):
 
 # Initialize the app
 app = dash.Dash(__name__)
+bucketSize = 1
+
+middle = getPriceOfAssetAdjustedForBucketSize("ETHUSDT", bucketSize)
+obJSON = getOrderBook("ETHUSDT", 5000)
+bidsDic, asksDic = sumQuantities(obJSON["bids"], obJSON["asks"], bucketSize)
+bidsPricesList = list(bidsDic.keys())
+asksPricesList = list(asksDic.keys())
+bidsPricesList.sort()
+asksPricesList.sort()
 
 # Set the initial y-axis range
-y_min = 1900
-y_max = 2100
+y_min = bidsPricesList[-51]
+y_max = asksPricesList[50]
+
 
 # Create an empty heatmap with random values
-heatmap = np.full((100, 100), np.nan)
+heatmap = np.full((101, 100), np.nan)
+initColumn = np.array([])
+for bidPrice in range(y_min, middle):
+    initColumn = np.append(initColumn, bidsDic[bidPrice])
+initColumn = np.append(initColumn, bidsDic[middle] + asksDic[middle])
+for askPrice in range(middle + 1, y_max + 1):
+    initColumn = np.append(initColumn, asksDic[askPrice])
+# Replace the last column of the array with the custom column
+heatmap[:, -1] = initColumn
 # Create the trace for the heatmap
 trace = go.Heatmap(z=heatmap, y=np.arange(y_min, y_max+1, 1), colorscale='hot')
 
@@ -54,7 +78,8 @@ trace = go.Heatmap(z=heatmap, y=np.arange(y_min, y_max+1, 1), colorscale='hot')
 layout = go.Layout(
     title='Real-Time Order Book',
     xaxis=dict(title='X Axis'),
-    yaxis=dict(title='Price')
+    yaxis=dict(title='Price'),
+    height=700
 )
 
 # Create the figure with the trace and layout
@@ -74,7 +99,7 @@ app.layout = html.Div(children=[
 def update_heatmap(n):
     global y_min, y_max, heatmap
     # Generate new column of heatmap data
-    new_col = np.random.randint(low=y_min, high=y_max+1, size=(100, 1))
+    new_col = np.random.randint(low=y_min, high=y_max+1, size=(101, 1))
 
     # Add new column to existing heatmap data
     heatmap = np.concatenate((heatmap, new_col), axis=1)
@@ -86,12 +111,9 @@ def update_heatmap(n):
         heatmap = heatmap[:, 1:]
 
     # Calculate the new minimum and maximum values of the y-axis
-    y_min_new = np.nanmin(heatmap)
-    y_max_new = np.nanmax(heatmap)
+    y_min_new = y_min
+    y_max_new = y_max
     
-    # Adjust the y-axis range to keep a fixed 50-unit gap between the minimum and maximum values
-    if y_max_new - y_min_new < 50:
-        y_min_new = y_max_new - 50
     
     # Update the heatmap trace with the new data and y-axis range
     fig.data[0].update(z=heatmap, y=np.arange(y_min_new, y_max_new+1, 1))
