@@ -1,9 +1,11 @@
 import websocket
 import json
+import time
 
 def on_message(ws, message):
     order_book = json.loads(message)
-    print(json.dumps(order_book, indent=4))
+    print(len(order_book['a']))
+    time.sleep(3)
 
 def on_error(ws, error):
     print(error)
