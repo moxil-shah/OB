@@ -7,12 +7,12 @@ from datetime import datetime, timedelta
 from dash_extensions import WebSocket
 from dash.exceptions import PreventUpdate
 import dash_daq as daq
+import time
 
 
 def getOrderBook(symbol, limit):
     response = requests.get(
         f'https://api.binance.com/api/v3/depth?symbol={symbol}&limit={limit}')
-    # print(response)
     return response.json()
 
 
@@ -75,11 +75,11 @@ def getColumns(y_min, middle, y_max, bidsDic, asksDic):
     return initColumn
 
 
-def initHeatMap():
-    global BUCKETSIZE, ORDERBOOKSIZE, TRADINGPAIR, PRICELEVELS, MAXCOLUMNS, BOTHSIDES, INTERVAL, heatmapBusy, middle, initial_mode
+def initHeatMap(symbol):
+    global BUCKETSIZE, ORDERBOOKSIZE, TRADINGPAIR, PRICELEVELS, MAXCOLUMNS, BOTHSIDES, INTERVAL, heatmapBusy, middle, initial_mode,  websocketSwitch, CURRENTWEBSOCKET
     BUCKETSIZE = 1
     ORDERBOOKSIZE = 5000
-    TRADINGPAIR = "BTCUSDT"
+    TRADINGPAIR = symbol
     middle = getPriceOfAssetAdjustedForBucketSize(TRADINGPAIR, BUCKETSIZE)
     obJSON = getOrderBook(TRADINGPAIR, ORDERBOOKSIZE)
     bidsDic, asksDic = sumQuantities(
@@ -89,12 +89,14 @@ def initHeatMap():
     MAXCOLUMNS = 30
     INTERVAL = 4000
     heatmapBusy = False
+    websocketSwitch = False
     initial_mode = 'lines+markers'
+    CURRENTWEBSOCKET = "wsMarketOrders" + symbol
 
 
 app = dash.Dash(__name__)
 
-initHeatMap()
+initHeatMap("BTCUSDT")
 
 # Set the initial y-axis range
 y_min = middle - BOTHSIDES
@@ -136,7 +138,8 @@ fig['layout']['uirevision'] = 1
 
 # Create the app layout
 app.layout = dash.html.Div(children=[
-    dash.dcc.Graph(id='realtime-orderbook', figure=fig),
+    dash.dcc.Dropdown(['BTCUSDT', 'ETHUSDT', 'LTCUSDT'],
+                      'BTCUSDT', id='pair-dropdown'),
     dash.dcc.Interval(id='interval-component',
                       interval=INTERVAL, n_intervals=0),
     dash.dcc.RadioItems(
@@ -147,9 +150,48 @@ app.layout = dash.html.Div(children=[
             {'label': 'Lines+Markers', 'value': 'lines+markers'}
         ],
         value=initial_mode
-    ), dash.dcc.Slider(min=0, max=5, step=0.1, value=1,
-                       id='bubble-size-slider'
-                       ), WebSocket(url=f"wss://stream.binance.com:9443/ws/{TRADINGPAIR.lower()}@trade", id="wsMarketOrders"),])
+    ), dash.dcc.Slider(min=0, max=5, step=0.1, value=1, id='bubble-size-slider'),
+    dash.html.Div(id='websocket-output',
+                  children=[
+                      WebSocket(
+                          url=f"wss://stream.binance.com:9443/ws/btcusdt@trade", id="wsMarketOrdersBTCUSDT"),
+                      WebSocket(
+                          url=f"wss://stream.binance.com:9443/ws/ethusdt@trade", id="wsMarketOrdersETHUSDT"),
+                      WebSocket(url=f"wss://stream.binance.com:9443/ws/ltcusdt@trade", id="wsMarketOrdersLTCUSDT")]
+                  ),
+    dash.dcc.Graph(id='realtime-orderbook', figure=fig)])
+# Define the callback function to update the WebSocket URL
+
+
+@app.callback(
+    dash.Output('pair-dropdown', 'value'),
+    dash.Input('pair-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def update_websocket_url(selected_pair):
+    global TRADINGPAIR, y_min, y_max, heatmap, timeArray, x1, y2, bubble_sizes, timeArray, websocketSwitch
+    websocketSwitch = True
+    time.sleep(2)
+    TRADINGPAIR = selected_pair
+    initHeatMap(TRADINGPAIR)
+
+    # Set the initial y-axis range
+    y_min = middle - BOTHSIDES
+    y_max = middle + BOTHSIDES
+
+    # Create an empty heatmap with random values
+    heatmap = np.full((PRICELEVELS, MAXCOLUMNS), np.nan)
+    timeArray = np.array([])
+    x1 = np.empty(0)
+    y2 = np.empty(0)
+    bubble_sizes = np.empty(0)
+
+    now = datetime.now() - timedelta(seconds=INTERVAL // 1000 * MAXCOLUMNS)
+    for i in range(MAXCOLUMNS):
+        timeArray = np.append(timeArray, now)
+        now = now + timedelta(seconds=INTERVAL // 1000)
+    websocketSwitch = False
+    return None
 
 
 @app.callback(
@@ -157,17 +199,21 @@ app.layout = dash.html.Div(children=[
     dash.dependencies.Input('interval-component', 'n_intervals'),
     dash.dependencies.Input('mode-switch', 'value'),
     dash.dependencies.Input('bubble-size-slider', 'value'),
-    dash.dependencies.Input("wsMarketOrders", "message"),
+    dash.dependencies.Input("wsMarketOrdersBTCUSDT", "message"),
+    dash.dependencies.Input("wsMarketOrdersETHUSDT", "message"),
+    dash.dependencies.Input("wsMarketOrdersLTCUSDT", "message"),
     prevent_initial_call=True
 )
-def update_heatmap(n, modeValue, sliderValue, e):
-    global y_min, y_max, heatmap, timeArray, x1, y2, bubble_sizes, heatmapBusy
+def update_heatmap(n, modeValue, sliderValue, e1, e2, e3):
+    global y_min, y_max, heatmap, timeArray, x1, y2, bubble_sizes, heatmapBusy, websocketSwitch
     triggered_id = dash.ctx.triggered_id
     if triggered_id == "mode-switch":
         fig['data'][1].mode = modeValue
     elif triggered_id == "bubble-size-slider":
         fig['data'][1].marker["sizeref"] = sliderValue
     elif triggered_id == "interval-component":
+        if websocketSwitch:
+            return fig
         if heatmapBusy:
             print("heatmap busy")
             return fig
@@ -215,13 +261,20 @@ def update_heatmap(n, modeValue, sliderValue, e):
         y_max = y_max_new
 
         heatmapBusy = False
-    elif triggered_id == "wsMarketOrders":
-        jsonData = e.get('data')
+        websocketSwitch = False
+    elif triggered_id == CURRENTWEBSOCKET:
+        if websocketSwitch:
+            return fig
+        if triggered_id == "wsMarketOrdersBTCUSDT" and CURRENTWEBSOCKET == "wsMarketOrdersBTCUSDT":
+            jsonData = e1.get('data')
+        elif triggered_id == "wsMarketOrdersETHUSDT" and CURRENTWEBSOCKET == "wsMarketOrdersETHUSDT":
+            jsonData = e2.get('data')
+        elif triggered_id == "wsMarketOrdersLTCUSDT" and CURRENTWEBSOCKET == "wsMarketOrdersLTCUSDT":
+            jsonData = e3.get('data')
         if jsonData:
             jsonData = json.loads(jsonData)
         else:
             return fig
-
         current_time = datetime.fromtimestamp(int(jsonData["T"]) / 1000)
 
         if len(x1) and current_time == x1[-1]:
