@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timedelta
 from dash_extensions import WebSocket
 from dash.exceptions import PreventUpdate
+import dash_daq as daq
 
 
 def getOrderBook(symbol, limit):
@@ -14,6 +15,7 @@ def getOrderBook(symbol, limit):
     # print(response)
     return response.json()
 
+
 def getPriceOfAssetAdjustedForBucketSize(symbol, bucket_size):
     response = requests.get(
         f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}')
@@ -21,6 +23,7 @@ def getPriceOfAssetAdjustedForBucketSize(symbol, bucket_size):
     # print(response)
     price = int(float(response["price"]) / bucket_size) * bucket_size
     return price
+
 
 def sumQuantities(bids, asks, bucket_size):
     # Create empty dictionaries for bids and asks
@@ -50,6 +53,7 @@ def sumQuantities(bids, asks, bucket_size):
 
     return bid_buckets, ask_buckets
 
+
 def getColumns(y_min, middle, y_max, bidsDic, asksDic):
     initColumn = np.array([])
     for bidPrice in range(y_min, middle):
@@ -71,17 +75,26 @@ def getColumns(y_min, middle, y_max, bidsDic, asksDic):
     return initColumn
 
 
-# Initialize the app
+def initHeatMap():
+    global BUCKETSIZE, ORDERBOOKSIZE, TRADINGPAIR, PRICELEVELS, MAXCOLUMNS, BOTHSIDES, INTERVAL, heatmapBusy, middle, initial_mode
+    BUCKETSIZE = 1
+    ORDERBOOKSIZE = 5000
+    TRADINGPAIR = "BTCUSDT"
+    middle = getPriceOfAssetAdjustedForBucketSize(TRADINGPAIR, BUCKETSIZE)
+    obJSON = getOrderBook(TRADINGPAIR, ORDERBOOKSIZE)
+    bidsDic, asksDic = sumQuantities(
+        obJSON["bids"], obJSON["asks"], BUCKETSIZE)
+    BOTHSIDES = max(middle - min(bidsDic), max(asksDic) - middle)
+    PRICELEVELS = BOTHSIDES * 2 + 1
+    MAXCOLUMNS = 30
+    INTERVAL = 4000
+    heatmapBusy = False
+    initial_mode = 'lines+markers'
+
+
 app = dash.Dash(__name__)
-BUCKETSIZE = 1
-ORDERBOOKSIZE = 5000
-PRICELEVELS = 1000 + 1
-MAXCOLUMNS = 30
-BOTHSIDES = PRICELEVELS // 2
-INTERVAL = 3000
-TRADINGPAIR = "BTCUSDT"
-heatmapBusy = False
-middle = getPriceOfAssetAdjustedForBucketSize(TRADINGPAIR, BUCKETSIZE)
+
+initHeatMap()
 
 # Set the initial y-axis range
 y_min = middle - BOTHSIDES
@@ -100,14 +113,14 @@ for i in range(MAXCOLUMNS):
     now = now + timedelta(seconds=INTERVAL // 1000)
 
 # Create the trace for the heatmap
-heatTrace = go.Heatmap( name='Limit Orders', z=heatmap, x=timeArray, y=np.arange(
+heatTrace = go.Heatmap(name='Limit Orders', z=heatmap, x=timeArray, y=np.arange(
     y_min, y_max+1, 1), colorscale='hot')
 
-bubbleTrace = go.Scatter(x=x1, y=y2, mode='lines+markers', name='Volume Profile',line=dict(width=2, color='blue'),
-                    marker=dict(size=bubble_sizes,
-                                sizemode='diameter', sizeref=1),
-                    hovertemplate="Quantity: %{marker.size:.2f}<br>Price: %{y}<extra></extra>"
-                    )
+bubbleTrace = go.Scatter(x=x1, y=y2, mode=initial_mode, name='Volume Profile', line=dict(width=2, color='blue'),
+                         marker=dict(size=bubble_sizes,
+                                     sizemode='diameter', sizeref=1),
+                         hovertemplate="Quantity: %{marker.size:.2f}<br>Price: %{y}<extra></extra>"
+                         )
 
 # Create the layout for the heatmap
 layout = go.Layout(
@@ -124,19 +137,37 @@ fig['layout']['uirevision'] = 1
 # Create the app layout
 app.layout = dash.html.Div(children=[
     dash.dcc.Graph(id='realtime-orderbook', figure=fig),
-    dash.dcc.Interval(id='interval-component', interval=INTERVAL, n_intervals=0),
-    WebSocket(url=f"wss://stream.binance.com:9443/ws/{TRADINGPAIR.lower()}@trade", id="wsMarketOrders")])
+    dash.dcc.Interval(id='interval-component',
+                      interval=INTERVAL, n_intervals=0),
+    dash.dcc.RadioItems(
+        id='mode-switch',
+        options=[
+            {'label': 'Lines', 'value': 'lines'},
+            {'label': 'Markers', 'value': 'markers'},
+            {'label': 'Lines+Markers', 'value': 'lines+markers'}
+        ],
+        value=initial_mode
+    ), dash.dcc.Slider(min=0, max=5, step=0.1, value=1,
+                       id='bubble-size-slider'
+                       ), WebSocket(url=f"wss://stream.binance.com:9443/ws/{TRADINGPAIR.lower()}@trade", id="wsMarketOrders"),])
+
 
 @app.callback(
     dash.dependencies.Output('realtime-orderbook', 'figure'),
     dash.dependencies.Input('interval-component', 'n_intervals'),
+    dash.dependencies.Input('mode-switch', 'value'),
+    dash.dependencies.Input('bubble-size-slider', 'value'),
     dash.dependencies.Input("wsMarketOrders", "message"),
     prevent_initial_call=True
 )
-def update_heatmap(n, e):
+def update_heatmap(n, modeValue, sliderValue, e):
     global y_min, y_max, heatmap, timeArray, x1, y2, bubble_sizes, heatmapBusy
     triggered_id = dash.ctx.triggered_id
-    if triggered_id == "interval-component":
+    if triggered_id == "mode-switch":
+        fig['data'][1].mode = modeValue
+    elif triggered_id == "bubble-size-slider":
+        fig['data'][1].marker["sizeref"] = sliderValue
+    elif triggered_id == "interval-component":
         if heatmapBusy:
             print("heatmap busy")
             return fig
@@ -158,7 +189,7 @@ def update_heatmap(n, e):
             nan_rows = np.full((shiftUp, heatmap.shape[1]), np.nan)
             # concatenate the NaN rows with the heatmap along the row axis
             heatmap = np.concatenate((heatmap, nan_rows), axis=0)
-        elif y_max_new < y_max: 
+        elif y_max_new < y_max:
             shiftDown = y_max - y_max_new
             heatmap = heatmap[:-shiftDown, :]
             # create a 2D array of NaN values with n rows and the same number of columns as the heatmap
@@ -177,7 +208,7 @@ def update_heatmap(n, e):
         timeArray = np.append(timeArray[1:], datetime.now())
         # Update the heatmap trace with the new data and y-axis range
         fig.data[0].update(z=heatmap, x=timeArray,
-                        y=np.arange(y_min_new, y_max_new+1, 1))
+                           y=np.arange(y_min_new, y_max_new+1, 1))
 
         # Store the updated y-axis range for the next update
         y_min = y_min_new
@@ -190,18 +221,19 @@ def update_heatmap(n, e):
             jsonData = json.loads(jsonData)
         else:
             return fig
- 
+
         current_time = datetime.fromtimestamp(int(jsonData["T"]) / 1000)
-      
+
         if len(x1) and current_time == x1[-1]:
             # Add 1 millisecond to the current time
             current_time += timedelta(milliseconds=1)
         x1 = np.append(x1,  current_time)
         y2 = np.append(y2, float(jsonData['p']))
         bubble_sizes = np.append(bubble_sizes, 10 * float(jsonData['q']))
-        
-            # Change bubble color based on the value of jsonData['w']
-        colors = np.where(jsonData['m'] is True, 'rgb(255, 0, 0)', 'rgb(0, 255, 0)')
+
+        # Change bubble color based on the value of jsonData['w']
+        colors = np.where(jsonData['m'] is True,
+                          'rgb(255, 0, 0)', 'rgb(0, 255, 0)')
         if fig['data'][1]['marker']['color'] is None:
             fig['data'][1]['marker']['color'] = []
         new_colors = np.append(fig['data'][1]['marker']['color'], colors)
@@ -217,9 +249,10 @@ def update_heatmap(n, e):
         fig['data'][1]['marker']['size'] = bubble_sizes
         fig['data'][1]['y'] = y2
         fig['data'][1]['marker']['color'] = new_colors  # Update bubble colors
-        
+
     # Return the updated figure
     return fig
+
 
 # Run the app
 if __name__ == '__main__':
