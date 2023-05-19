@@ -1,28 +1,32 @@
-import dash
-import plotly.graph_objs as go
 import numpy as np
+import plotly.graph_objs as go
 import requests
-import json
 from datetime import datetime, timedelta
-from dash_extensions import WebSocket
-from dash.exceptions import PreventUpdate
-import dash_daq as daq
-import time
+from dash import Dash, dcc, html, ctx
+from dash.dependencies import Input, Output
+
+VERIFY = True
+BUCKETSIZE = 1
 
 
 def getOrderBook(symbol, limit):
-    response = requests.get(
-        f'https://api.binance.com/api/v3/depth?symbol={symbol}&limit={limit}')
-    return response.json()
+    url = f'https://api.binance.com/api/v3/depth?symbol={symbol}&limit={limit}'
+    response = requests.get(url, verify=VERIFY)
+    # Check for request failure and raise an exception if needed
+    response.raise_for_status()
+    response_json = response.json()
+    return response_json
 
 
 def getPriceOfAssetAdjustedForBucketSize(symbol, bucket_size):
-    response = requests.get(
-        f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}')
-    response = response.json()
-    # print(response)
-    price = int(float(response["price"]) / bucket_size) * bucket_size
-    return price
+    url = f'https://api.binance.com/api/v3/ticker/price?symbol={symbol}'
+    response = requests.get(url, verify=VERIFY)
+    # Check for request failure and raise an exception if needed
+    response.raise_for_status()
+    response_json = response.json()
+    price = float(response_json["price"])
+    adjusted_price = int(price / bucket_size) * bucket_size
+    return adjusted_price
 
 
 def sumQuantities(bids, asks, bucket_size):
@@ -76,232 +80,163 @@ def getColumns(y_min, middle, y_max, bidsDic, asksDic):
 
 
 def initHeatMap(symbol):
-    global BUCKETSIZE, ORDERBOOKSIZE, TRADINGPAIR, PRICELEVELS, MAXCOLUMNS, BOTHSIDES, INTERVAL, heatmapBusy, middle, initial_mode,  websocketSwitch, CURRENTWEBSOCKET
-    BUCKETSIZE = 1
-    ORDERBOOKSIZE = 5000
-    TRADINGPAIR = symbol
-    middle = getPriceOfAssetAdjustedForBucketSize(TRADINGPAIR, BUCKETSIZE)
-    obJSON = getOrderBook(TRADINGPAIR, ORDERBOOKSIZE)
+    global g_orderBookSize, g_tradingPair, g_priceLevels, g_maxColumns, g_bothSides, g_intervals, g_initialMode
+    g_orderBookSize = 1000
+    g_tradingPair = symbol
+    middle = getPriceOfAssetAdjustedForBucketSize(g_tradingPair, BUCKETSIZE)
+    obJSON = getOrderBook(g_tradingPair, g_orderBookSize)
     bidsDic, asksDic = sumQuantities(
         obJSON["bids"], obJSON["asks"], BUCKETSIZE)
-    BOTHSIDES = max(middle - min(bidsDic), max(asksDic) - middle)
-    PRICELEVELS = BOTHSIDES * 2 + 1
-    MAXCOLUMNS = 30
-    INTERVAL = 4000
-    heatmapBusy = False
-    websocketSwitch = False
-    initial_mode = 'lines+markers'
-    CURRENTWEBSOCKET = "wsMarketOrders" + symbol
+    g_bothSides = max(middle - min(bidsDic), max(asksDic) - middle)
+    g_priceLevels = g_bothSides * 2 + 1
+    g_maxColumns = 100
+    g_intervals = 1000
+    g_initialMode = 'lines+markers'
+    return middle - g_bothSides, middle + g_bothSides
 
 
-app = dash.Dash(__name__)
+def padTimeArray():
+    global g_timeArray, g_intervals, g_maxColumns
+    now = datetime.now() - timedelta(seconds=g_intervals // 1000 * g_maxColumns)
+    for i in range(g_maxColumns):
+        g_timeArray = np.append(g_timeArray, now)
+        now = now + timedelta(seconds=g_intervals // 1000)
 
-initHeatMap("BTCUSDT")
+
+app = Dash(__name__)
+app.prevent_initial_callbacks = False
 
 # Set the initial y-axis range
-y_min = middle - BOTHSIDES
-y_max = middle + BOTHSIDES
+g_yMin, g_yMax = initHeatMap("ETHUSDT")
 
-# Create an empty heatmap with random values
-heatmap = np.full((PRICELEVELS, MAXCOLUMNS), np.nan)
-timeArray = np.array([])
-x1 = np.empty(0)
-y2 = np.empty(0)
-bubble_sizes = np.empty(0)
+# Create an empty heatmap
+g_heatmap = np.full((g_priceLevels, g_maxColumns), np.nan)
+g_timeArray = np.array([])
+g_bestBidX = np.empty(0)
+g_bestBidY = np.empty(0)
+g_bestAskX = np.empty(0)
+g_bestAskY = np.empty(0)
 
-now = datetime.now() - timedelta(seconds=INTERVAL // 1000 * MAXCOLUMNS)
-for i in range(MAXCOLUMNS):
-    timeArray = np.append(timeArray, now)
-    now = now + timedelta(seconds=INTERVAL // 1000)
+padTimeArray()
 
 # Create the trace for the heatmap
-heatTrace = go.Heatmap(name='Limit Orders', z=heatmap, x=timeArray, y=np.arange(
-    y_min, y_max+1, 1), colorscale='hot')
+heatTrace = go.Heatmap(name='Limit Orders', z=g_heatmap, x=g_timeArray, y=np.arange(
+    g_yMin, g_yMax+1, 1), colorscale='Cividis')
 
-bubbleTrace = go.Scatter(x=x1, y=y2, mode=initial_mode, name='Volume Profile', line=dict(width=2, color='blue'),
-                         marker=dict(size=bubble_sizes,
-                                     sizemode='diameter', sizeref=1),
-                         hovertemplate="Quantity: %{marker.size:.2f}<br>Price: %{y}<extra></extra>"
-                         )
+bestBidTrace = go.Scatter(x=g_bestBidX, y=g_bestBidY, mode=g_initialMode,
+                          name='Best Bid Trace', line=dict(width=1, color='green'))
+bestAskTrace = go.Scatter(x=g_bestAskX, y=g_bestAskY, mode=g_initialMode,
+                          name='Best Ask Trace', line=dict(width=1, color='red'))
 
 # Create the layout for the heatmap
 layout = go.Layout(
-    title='Real-Time Order Book',
+    title=f'Real-Time Order Book for {g_tradingPair}',
     xaxis=dict(title='Time'),
     yaxis=dict(title='Price'),
     height=800
 )
 
 # Create the figure with the trace and layout
-fig = go.Figure(data=[heatTrace, bubbleTrace], layout=layout)
+fig = go.Figure(data=[heatTrace, bestBidTrace, bestAskTrace], layout=layout)
 fig['layout']['uirevision'] = 1
 
 # Create the app layout
-app.layout = dash.html.Div(children=[
-    dash.dcc.Dropdown(['BTCUSDT', 'ETHUSDT', 'LTCUSDT'],
-                      'BTCUSDT', id='pair-dropdown'),
-    dash.dcc.Interval(id='interval-component',
-                      interval=INTERVAL, n_intervals=0),
-    dash.dcc.RadioItems(
+app.layout = html.Div(children=[
+    dcc.Dropdown(['BTCUSDT', 'ETHUSDT'],
+                 'ETHUSDT', id='pair-dropdown'),
+    dcc.Interval(id='interval-component',
+                 interval=g_intervals, n_intervals=0),
+    dcc.RadioItems(
         id='mode-switch',
         options=[
             {'label': 'Lines', 'value': 'lines'},
             {'label': 'Markers', 'value': 'markers'},
             {'label': 'Lines+Markers', 'value': 'lines+markers'}
         ],
-        value=initial_mode
-    ), dash.dcc.Slider(min=0, max=5, step=0.1, value=1, id='bubble-size-slider'),
-    dash.html.Div(id='websocket-output',
-                  children=[
-                      WebSocket(
-                          url=f"wss://stream.binance.com:9443/ws/btcusdt@trade", id="wsMarketOrdersBTCUSDT"),
-                      WebSocket(
-                          url=f"wss://stream.binance.com:9443/ws/ethusdt@trade", id="wsMarketOrdersETHUSDT"),
-                      WebSocket(url=f"wss://stream.binance.com:9443/ws/ltcusdt@trade", id="wsMarketOrdersLTCUSDT")]
-                  ),
-    dash.dcc.Graph(id='realtime-orderbook', figure=fig)])
-# Define the callback function to update the WebSocket URL
+        value=g_initialMode
+    ),
+    dcc.Graph(id='realtime-orderbook', figure=fig)])
 
 
 @app.callback(
-    dash.Output('pair-dropdown', 'value'),
-    dash.Input('pair-dropdown', 'value'),
-    prevent_initial_call=True
+    Output('realtime-orderbook', 'figure'),
+    Input('interval-component', 'n_intervals'),
+    Input('mode-switch', 'value'),
 )
-def update_websocket_url(selected_pair):
-    global TRADINGPAIR, y_min, y_max, heatmap, timeArray, x1, y2, bubble_sizes, timeArray, websocketSwitch
-    websocketSwitch = True
-    time.sleep(2)
-    TRADINGPAIR = selected_pair
-    initHeatMap(TRADINGPAIR)
+def update_heatmap(n, modeValue):
+    global g_yMin, g_yMax, g_heatmap, g_timeArray, g_bestBidX, g_bestBidY, g_bestAskX, g_bestAskY, g_orderBookSize
+    triggered_id = ctx.triggered_id
 
-    # Set the initial y-axis range
-    y_min = middle - BOTHSIDES
-    y_max = middle + BOTHSIDES
-
-    # Create an empty heatmap with random values
-    heatmap = np.full((PRICELEVELS, MAXCOLUMNS), np.nan)
-    timeArray = np.array([])
-    x1 = np.empty(0)
-    y2 = np.empty(0)
-    bubble_sizes = np.empty(0)
-
-    now = datetime.now() - timedelta(seconds=INTERVAL // 1000 * MAXCOLUMNS)
-    for i in range(MAXCOLUMNS):
-        timeArray = np.append(timeArray, now)
-        now = now + timedelta(seconds=INTERVAL // 1000)
-    websocketSwitch = False
-    return None
-
-
-@app.callback(
-    dash.dependencies.Output('realtime-orderbook', 'figure'),
-    dash.dependencies.Input('interval-component', 'n_intervals'),
-    dash.dependencies.Input('mode-switch', 'value'),
-    dash.dependencies.Input('bubble-size-slider', 'value'),
-    dash.dependencies.Input("wsMarketOrdersBTCUSDT", "message"),
-    dash.dependencies.Input("wsMarketOrdersETHUSDT", "message"),
-    dash.dependencies.Input("wsMarketOrdersLTCUSDT", "message"),
-    prevent_initial_call=True
-)
-def update_heatmap(n, modeValue, sliderValue, e1, e2, e3):
-    global y_min, y_max, heatmap, timeArray, x1, y2, bubble_sizes, heatmapBusy, websocketSwitch
-    triggered_id = dash.ctx.triggered_id
     if triggered_id == "mode-switch":
         fig['data'][1].mode = modeValue
-    elif triggered_id == "bubble-size-slider":
-        fig['data'][1].marker["sizeref"] = sliderValue
+
     elif triggered_id == "interval-component":
-        if websocketSwitch:
+        columnTime = datetime.now()
+        try:
+            middle = getPriceOfAssetAdjustedForBucketSize(
+                g_tradingPair, BUCKETSIZE)
+            obJSON = getOrderBook(g_tradingPair, g_orderBookSize)
+            bestBid = obJSON["bids"][0][0]
+            bestAsk = obJSON["asks"][0][0]
+        except Exception as e:
+            print("Error: ", e)
             return fig
-        if heatmapBusy:
-            print("heatmap busy")
-            return fig
-        heatmapBusy = True
-        # Generate new column of heatmap data
-        middle = getPriceOfAssetAdjustedForBucketSize(TRADINGPAIR, BUCKETSIZE)
-        obJSON = getOrderBook(TRADINGPAIR, ORDERBOOKSIZE)
-        bidsDic, asksDic = sumQuantities(
-            obJSON["bids"], obJSON["asks"], BUCKETSIZE)
+        else:
+            bidsDic, asksDic = sumQuantities(
+                obJSON["bids"], obJSON["asks"], BUCKETSIZE)
 
         # Set the initial y-axis range
-        y_min_new = middle - BOTHSIDES
-        y_max_new = middle + BOTHSIDES
+        yMinNew = middle - g_bothSides
+        yMaxNew = middle + g_bothSides
 
-        if y_max_new > y_max:
-            shiftUp = y_max_new - y_max
-            heatmap = heatmap[shiftUp:, :]
+        if yMaxNew > g_yMax:
+            shiftUp = yMaxNew - g_yMax
+            g_heatmap = g_heatmap[shiftUp:, :]
             # create a 2D array of NaN values with n rows and the same number of columns as the heatmap
-            nan_rows = np.full((shiftUp, heatmap.shape[1]), np.nan)
+            nan_rows = np.full((shiftUp, g_heatmap.shape[1]), np.nan)
             # concatenate the NaN rows with the heatmap along the row axis
-            heatmap = np.concatenate((heatmap, nan_rows), axis=0)
-        elif y_max_new < y_max:
-            shiftDown = y_max - y_max_new
-            heatmap = heatmap[:-shiftDown, :]
+            g_heatmap = np.concatenate((g_heatmap, nan_rows), axis=0)
+        elif yMaxNew < g_yMax:
+            shiftDown = g_yMax - yMaxNew
+            g_heatmap = g_heatmap[:-shiftDown, :]
             # create a 2D array of NaN values with n rows and the same number of columns as the heatmap
-            nan_rows = np.full((shiftDown, heatmap.shape[1]), np.nan)
+            nan_rows = np.full((shiftDown, g_heatmap.shape[1]), np.nan)
             # concatenate the NaN rows with the heatmap along the row axis
-            heatmap = np.concatenate((nan_rows, heatmap), axis=0)
+            g_heatmap = np.concatenate((nan_rows, g_heatmap), axis=0)
 
-        new_col = getColumns(y_min_new, middle, y_max_new, bidsDic, asksDic)
+        # Generate new column of heatmap data
+        new_col = getColumns(yMinNew, middle, yMaxNew, bidsDic, asksDic)
         new_col = new_col.reshape((len(new_col), 1))
 
         # Add new column to existing heatmap data
-        heatmap = np.concatenate((heatmap, new_col), axis=1)
+        g_heatmap = np.concatenate((g_heatmap, new_col), axis=1)
 
+        g_bestBidX = np.append(g_bestBidX,  columnTime)
+        g_bestBidY = np.append(g_bestBidY, bestBid)
+        g_bestAskX = np.append(g_bestAskX,  columnTime)
+        g_bestAskY = np.append(g_bestAskY, bestAsk)
         # Delete the leftmost column of heatmap data
-        heatmap = heatmap[:, 1:]
-        timeArray = np.append(timeArray[1:], datetime.now())
+        g_heatmap = g_heatmap[:, 1:]
+
+        if len(g_bestBidX) > g_maxColumns:
+            g_bestBidX = np.delete(g_bestBidX, 0)
+            g_bestBidY = np.delete(g_bestBidY, 0)
+        if len(g_bestAskX) > g_maxColumns:
+            g_bestAskX = np.delete(g_bestAskX, 0)
+            g_bestAskY = np.delete(g_bestAskY, 0)
+
+        g_timeArray = np.append(g_timeArray[1:], columnTime)
         # Update the heatmap trace with the new data and y-axis range
-        fig.data[0].update(z=heatmap, x=timeArray,
-                           y=np.arange(y_min_new, y_max_new+1, 1))
+        fig.data[0].update(z=g_heatmap, x=g_timeArray,
+                           y=np.arange(yMinNew, yMaxNew+1, 1))
+        fig['data'][1]['x'] = g_bestBidX
+        fig['data'][1]['y'] = g_bestBidY
+        fig['data'][2]['x'] = g_bestAskX
+        fig['data'][2]['y'] = g_bestAskY
 
         # Store the updated y-axis range for the next update
-        y_min = y_min_new
-        y_max = y_max_new
-
-        heatmapBusy = False
-        websocketSwitch = False
-    elif triggered_id == CURRENTWEBSOCKET:
-        if websocketSwitch:
-            return fig
-        if triggered_id == "wsMarketOrdersBTCUSDT" and CURRENTWEBSOCKET == "wsMarketOrdersBTCUSDT":
-            jsonData = e1.get('data')
-        elif triggered_id == "wsMarketOrdersETHUSDT" and CURRENTWEBSOCKET == "wsMarketOrdersETHUSDT":
-            jsonData = e2.get('data')
-        elif triggered_id == "wsMarketOrdersLTCUSDT" and CURRENTWEBSOCKET == "wsMarketOrdersLTCUSDT":
-            jsonData = e3.get('data')
-        if jsonData:
-            jsonData = json.loads(jsonData)
-        else:
-            return fig
-        current_time = datetime.fromtimestamp(int(jsonData["T"]) / 1000)
-
-        if len(x1) and current_time == x1[-1]:
-            # Add 1 millisecond to the current time
-            current_time += timedelta(milliseconds=1)
-        x1 = np.append(x1,  current_time)
-        y2 = np.append(y2, float(jsonData['p']))
-        bubble_sizes = np.append(bubble_sizes, 10 * float(jsonData['q']))
-
-        # Change bubble color based on the value of jsonData['w']
-        colors = np.where(jsonData['m'] is True,
-                          'rgb(255, 0, 0)', 'rgb(0, 255, 0)')
-        if fig['data'][1]['marker']['color'] is None:
-            fig['data'][1]['marker']['color'] = []
-        new_colors = np.append(fig['data'][1]['marker']['color'], colors)
-
-        while len(x1) > 0 and x1[0] < timeArray[0]:
-            x1 = np.delete(x1, 0)
-            y2 = np.delete(y2, 0)
-            bubble_sizes = np.delete(bubble_sizes, 0)
-            new_colors = np.delete(new_colors, 0)
-
-        # Update the size and sizemode of the marker of the bubble chart trace
-        fig['data'][1]['x'] = x1
-        fig['data'][1]['marker']['size'] = bubble_sizes
-        fig['data'][1]['y'] = y2
-        fig['data'][1]['marker']['color'] = new_colors  # Update bubble colors
+        g_yMin = yMinNew
+        g_yMax = yMaxNew
 
     # Return the updated figure
     return fig
