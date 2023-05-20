@@ -254,7 +254,7 @@ def update_websocket(uri):
 )
 def update_heatmap(n):
     global g_yMin, g_yMax, g_heatmap, g_timeArray, g_bestBidX, g_bestBidY, g_bestAskX, g_bestAskY, g_orderBookSize, g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes, g_updateHeatmapBusy
-
+    
     columnTime = datetime.now()
     try:
         middle = getPriceOfAssetAdjustedForBucketSize(
