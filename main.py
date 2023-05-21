@@ -171,6 +171,7 @@ def wsrun(uri):
 
 
 app = Dash(__name__)
+server = app.server
 app.prevent_initial_callbacks = False
 g_endpoints = {
     'ETHUSDT': 'wss://stream.binance.com:9443/ws/ethusdt@aggTrade',
