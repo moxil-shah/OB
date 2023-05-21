@@ -4,9 +4,10 @@ import requests
 from datetime import datetime, timedelta
 import threading
 import websocket
+import time
 import json
 from dash import Dash, dcc, html, ctx
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
 ### CONSTANTS ###
@@ -86,9 +87,9 @@ def getColumns(y_min, middle, y_max, bidsDic, asksDic):
     return initColumn
 
 
-def initHeatMap(symbol):
-    global g_orderBookSize, g_tradingPair, g_priceLevels, g_maxColumns, g_bothSides, g_intervals, g_initialMode
-    g_orderBookSize = 1000
+def initHeatMap(symbol, orderBookSize):
+    global g_orderBookSize, g_tradingPair, g_priceLevels, g_maxColumns, g_bothSides, g_intervals, g_initialMode, g_orderBookLimits
+    g_orderBookSize = orderBookSize
     g_tradingPair = symbol
     middle = getPriceOfAssetAdjustedForBucketSize(g_tradingPair, BUCKETSIZE)
     obJSON = getOrderBook(g_tradingPair, g_orderBookSize)
@@ -97,13 +98,14 @@ def initHeatMap(symbol):
     g_bothSides = max(middle - min(bidsDic), max(asksDic) - middle)
     g_priceLevels = g_bothSides * 2 + 1
     g_maxColumns = 100
-    g_intervals = 1000
+    g_intervals = g_orderBookLimits[orderBookSize]
     g_initialMode = 'lines+markers'
     return middle - g_bothSides, middle + g_bothSides
 
 
 def padTimeArray():
     global g_timeArray, g_intervals, g_maxColumns
+    g_timeArray = np.array([])
     now = datetime.now() - timedelta(seconds=g_intervals // 1000 * g_maxColumns)
     for i in range(g_maxColumns):
         g_timeArray = np.append(g_timeArray, now)
@@ -111,7 +113,7 @@ def padTimeArray():
 
 
 def on_message(ws, message):
-    global g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes
+    global g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes, g_newColors
     try:
         jsonData = json.loads(message)
         symbol = jsonData["s"]
@@ -139,18 +141,16 @@ def on_message(ws, message):
                           'rgb(255, 0, 0)', 'rgb(0, 255, 0)')
         if fig['data'][3]['marker']['color'] is None:
             fig['data'][3]['marker']['color'] = []
-        newColors = np.append(fig['data'][3]['marker']['color'], colors)
+        g_newColors = np.append(fig['data'][3]['marker']['color'], colors)
 
         while len(g_marketOrderFlowX) > 0 and g_marketOrderFlowX[0] < g_timeArray[0]:
             g_marketOrderFlowX = np.delete(g_marketOrderFlowX, 0)
             g_marketOrderFlowY = np.delete(g_marketOrderFlowY, 0)
             g_bubbleSizes = np.delete(g_bubbleSizes, 0)
-            newColors = np.delete(newColors, 0)
+            g_newColors = np.delete(g_newColors, 0)
 
-        fig['data'][3]['x'] = g_marketOrderFlowX
-        fig['data'][3]['marker']['size'] = g_bubbleSizes
-        fig['data'][3]['y'] = g_marketOrderFlowY
-        fig['data'][3]['marker']['color'] = newColors
+    fig['data'][3]['marker']['size'] = g_bubbleSizes
+    fig['data'][3]['marker']['color'] = g_newColors
 
 
 def on_error(ws, error):
@@ -172,24 +172,31 @@ def wsrun(uri):
 
 app = Dash(__name__)
 app.prevent_initial_callbacks = False
+g_endpoints = {
+    'ETHUSDT': 'wss://stream.binance.com:9443/ws/ethusdt@aggTrade',
+    'BTCUSDT': 'wss://stream.binance.com:9443/ws/btcusdt@aggTrade'
+}
+g_orderBookLimits = {
+    100: 100,
+    500: 500,
+    1000: 1000,
+    5000: 3000
+}
 
 # Set the initial y-axis range
-g_yMin, g_yMax = initHeatMap("ETHUSDT")
+g_yMin, g_yMax = initHeatMap("ETHUSDT", 5000)
 
 # Create an empty heatmap
 g_heatmap = np.full((g_priceLevels, g_maxColumns), np.nan)
-g_timeArray = np.array([])
+g_timeArray = None
 g_bestBidX = np.empty(0)
 g_bestBidY = np.empty(0)
 g_bestAskX = np.empty(0)
 g_bestAskY = np.empty(0)
 g_marketOrderFlowX = np.empty(0)
 g_marketOrderFlowY = np.empty(0)
-g_endpoints = {
-    'ETH/USDT': 'wss://stream.binance.com:9443/ws/ethusdt@aggTrade',
-    'BTC/USDT': 'wss://stream.binance.com:9443/ws/btcusdt@aggTrade'
-}
 g_bubbleSizes = np.empty(0)
+g_newColors = np.empty(0)
 g_tradeWS = None
 g_updateHeatmapBusy = False
 
@@ -225,36 +232,67 @@ fig['layout']['uirevision'] = 1
 app.layout = html.Div(children=[
     dcc.Dropdown(
         id='endpoint-dropdown',
-        options=[{'label': symbol, 'value': uri}
-                 for symbol, uri in g_endpoints.items()],
+        options=list(g_endpoints.keys()),
         # Set the default value to the first endpoint
-        value=None
+        value='ETHUSDT'
+    ),
+    dcc.Dropdown(
+        id='orderbook-dropdown',
+        options=list(g_orderBookLimits.keys()),
+        # Set the default value to the first endpoint
+        value=5000
     ),
     dcc.Interval(id='interval-component',
                  interval=g_intervals, n_intervals=0),
     dcc.Graph(id='realtime-orderbook', figure=fig), html.Div(id='output')])
 
-# Callback to update the WebSocket connection when the dropdown value changes
+
+@app.callback(Output('interval-component', 'interval'), [Input('orderbook-dropdown', 'value')], [State('endpoint-dropdown', 'value')], prevent_initial_call=True)
+def heatmapSetup(e, pair):
+    global g_yMin, g_yMax, g_heatmap, g_timeArray, g_bestBidX, g_bestBidY, g_bestAskX, g_bestAskY, g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes, g_tradeWS, g_updateHeatmapBusy, g_newColors
+    g_updateHeatmapBusy = True
+    g_yMin, g_yMax = initHeatMap(pair, e)
+    # Create an empty heatmap
+    g_heatmap = np.full((g_priceLevels, g_maxColumns), np.nan)
+    g_timeArray = None
+    g_bestBidX = np.empty(0)
+    g_bestBidY = np.empty(0)
+    g_bestAskX = np.empty(0)
+    g_bestAskY = np.empty(0)
+    g_marketOrderFlowX = np.empty(0)
+    g_marketOrderFlowY = np.empty(0)
+    g_bubbleSizes = np.empty(0)
+    g_newColors = np.empty(0)
+    g_updateHeatmapBusy = False
+
+    padTimeArray()
+
+    return e
 
 
-@app.callback(Output('output', 'children'), [Input('endpoint-dropdown', 'value')], prevent_initial_call=True)
-def update_websocket(uri):
+@app.callback(Output('orderbook-dropdown', 'value'), [Input('endpoint-dropdown', 'value')], [State('orderbook-dropdown', 'value')])
+def update_websocket(uri, limit):
+    global g_endpoints, g_tradeWS
     if g_tradeWS:
         g_tradeWS.close()
     websocket_thread = threading.Thread(
-        target=wsrun, args=(uri,), name='websocket_thread')
+        target=wsrun, args=(g_endpoints[uri],), name='websocket_thread')
     websocket_thread.start()
 
-    return f"Connected to {uri}"
+    return limit
 
 
 @app.callback(
     Output('realtime-orderbook', 'figure'),
     Input('interval-component', 'n_intervals'),
+    prevent_initial_call=True
 )
 def update_heatmap(n):
-    global g_yMin, g_yMax, g_heatmap, g_timeArray, g_bestBidX, g_bestBidY, g_bestAskX, g_bestAskY, g_orderBookSize, g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes, g_updateHeatmapBusy
-    
+    global g_yMin, g_yMax, g_heatmap, g_timeArray, g_bestBidX, g_bestBidY, g_bestAskX, g_bestAskY, g_orderBookSize, g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes, g_updateHeatmapBusy, g_newColors
+    if g_updateHeatmapBusy:
+        print("Heatmap busy...")
+        return fig
+    g_updateHeatmapBusy = True
     columnTime = datetime.now()
     try:
         middle = getPriceOfAssetAdjustedForBucketSize(
@@ -317,12 +355,15 @@ def update_heatmap(n):
     fig['data'][1]['y'] = g_bestBidY
     fig['data'][2]['x'] = g_bestAskX
     fig['data'][2]['y'] = g_bestAskY
+    fig['data'][3]['x'] = g_marketOrderFlowX
+    fig['data'][3]['y'] = g_marketOrderFlowY
 
     # Store the updated y-axis range for the next update
     g_yMin = yMinNew
     g_yMax = yMaxNew
 
     # Return the updated figure
+    g_updateHeatmapBusy = False
     return fig
 
 
