@@ -177,9 +177,9 @@ g_endpoints = {
     'BTCUSDT': 'wss://stream.binance.com:9443/ws/btcusdt@aggTrade'
 }
 g_orderBookLimits = {
-    100: 100,
-    500: 500,
-    1000: 1000,
+    100: 2000,
+    500: 2000,
+    1000: 2000,
     5000: 3000
 }
 
@@ -217,7 +217,7 @@ bubbleTrace = go.Scatter(x=g_marketOrderFlowX, y=g_marketOrderFlowY, mode=g_init
 
 # Create the layout for the heatmap
 layout = go.Layout(
-    title=f'Real-Time Order Book for {g_tradingPair}',
+    title=f'Real-Time Order Book',
     xaxis=dict(title='Time'),
     yaxis=dict(title='Price'),
     height=800
