@@ -221,7 +221,7 @@ layout = go.Layout(
     title=f'Real-Time Order Book',
     xaxis=dict(title='Time'),
     yaxis=dict(title='Price'),
-    height=800
+    height=600
 )
 
 # Create the figure with the trace and layout
@@ -243,6 +243,7 @@ app.layout = html.Div(children=[
         # Set the default value to the first endpoint
         value=5000
     ),
+    dcc.Slider(min=0, max=5, step=0.1, value=1, id='bubble-size-slider'),
     dcc.Interval(id='interval-component',
                  interval=g_intervals, n_intervals=0),
     dcc.Graph(id='realtime-orderbook', figure=fig), html.Div(id='output')])
@@ -286,10 +287,16 @@ def update_websocket(uri, limit):
 @app.callback(
     Output('realtime-orderbook', 'figure'),
     Input('interval-component', 'n_intervals'),
+    Input('bubble-size-slider', 'value'),
     prevent_initial_call=True
 )
-def update_heatmap(n):
+def update_heatmap(n, sliderValue):
     global g_yMin, g_yMax, g_heatmap, g_timeArray, g_bestBidX, g_bestBidY, g_bestAskX, g_bestAskY, g_orderBookSize, g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes, g_updateHeatmapBusy, g_newColors
+    triggered_id = ctx.triggered_id
+    if triggered_id == "bubble-size-slider":
+        fig['data'][3].marker["sizeref"] = sliderValue
+        return fig
+
     if g_updateHeatmapBusy:
         print("Heatmap busy...")
         return fig
@@ -303,6 +310,7 @@ def update_heatmap(n):
         bestAsk = obJSON["asks"][0][0]
     except Exception as e:
         print("Error: ", e)
+        g_updateHeatmapBusy = False
         return fig
     else:
         bidsDic, asksDic = sumQuantities(
@@ -370,4 +378,4 @@ def update_heatmap(n):
 
 # Run the app
 if __name__ == '__main__':
-    app.run_server(debug=False)
+    app.run_server(debug=True)
