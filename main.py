@@ -246,6 +246,7 @@ app.layout = html.Div(children=[
     dcc.Slider(min=0, max=5, step=0.1, value=1, id='bubble-size-slider'),
     dcc.Interval(id='interval-component',
                  interval=g_intervals, n_intervals=0),
+    html.H3("Waiting...", id="asset-price"),
     dcc.Graph(id='realtime-orderbook', figure=fig), html.Div(id='output')])
 
 
@@ -286,20 +287,33 @@ def update_websocket(uri, limit):
 
 @app.callback(
     Output('realtime-orderbook', 'figure'),
+    Output('asset-price', 'children'),
+    Output("asset-price", "style"),
     Input('interval-component', 'n_intervals'),
     Input('bubble-size-slider', 'value'),
+    State("asset-price", "children"),
     prevent_initial_call=True
 )
-def update_heatmap(n, sliderValue):
+def update_heatmap(n, sliderValue, lastTradedPrice):
     global g_yMin, g_yMax, g_heatmap, g_timeArray, g_bestBidX, g_bestBidY, g_bestAskX, g_bestAskY, g_orderBookSize, g_marketOrderFlowX, g_marketOrderFlowY, g_bubbleSizes, g_updateHeatmapBusy, g_newColors
+
+    try:
+        lastTradedPrice = float(lastTradedPrice)
+    except ValueError:
+        lastPriceColor = "red"
+    else:
+        lastPriceColor = "red" if lastTradedPrice > g_marketOrderFlowY[-1] else "green"
+    finally:
+        newLastPriceColor = {"color": lastPriceColor}
+
     triggered_id = ctx.triggered_id
     if triggered_id == "bubble-size-slider":
         fig['data'][3].marker["sizeref"] = sliderValue
-        return fig
+        return fig, g_marketOrderFlowY[-1] if len(g_marketOrderFlowY) else "Waiting...", newLastPriceColor
 
     if g_updateHeatmapBusy:
         print("Heatmap busy...")
-        return fig
+        return fig, g_marketOrderFlowY[-1] if len(g_marketOrderFlowY) else "Waiting...", newLastPriceColor
     g_updateHeatmapBusy = True
     columnTime = datetime.now()
     try:
@@ -311,7 +325,7 @@ def update_heatmap(n, sliderValue):
     except Exception as e:
         print("Error: ", e)
         g_updateHeatmapBusy = False
-        return fig
+        return fig, g_marketOrderFlowY[-1] if len(g_marketOrderFlowY) else "Waiting...", newLastPriceColor
     else:
         bidsDic, asksDic = sumQuantities(
             obJSON["bids"], obJSON["asks"], BUCKETSIZE)
@@ -373,7 +387,8 @@ def update_heatmap(n, sliderValue):
 
     # Return the updated figure
     g_updateHeatmapBusy = False
-    return fig
+
+    return fig, g_marketOrderFlowY[-1], newLastPriceColor
 
 
 # Run the app
