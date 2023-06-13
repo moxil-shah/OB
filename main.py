@@ -49,9 +49,9 @@ def sumQuantities(bids, asks, bucket_size):
         bucket_price = int(float(price) / bucket_size) * bucket_size
         # Add this quantity to the appropriate bucket
         if bucket_price in bid_buckets:
-            bid_buckets[bucket_price] += float(quantity)
+            bid_buckets[bucket_price] += float(quantity) * float(price)
         else:
-            bid_buckets[bucket_price] = float(quantity)
+            bid_buckets[bucket_price] = float(quantity) * float(price)
 
     for ask in asks:
         price, quantity = ask
@@ -59,9 +59,9 @@ def sumQuantities(bids, asks, bucket_size):
         bucket_price = int(float(price) / bucket_size) * bucket_size
         # Add this quantity to the appropriate bucket
         if bucket_price in ask_buckets:
-            ask_buckets[bucket_price] += float(quantity)
+            ask_buckets[bucket_price] += float(quantity) * float(price)
         else:
-            ask_buckets[bucket_price] = float(quantity)
+            ask_buckets[bucket_price] = float(quantity) * float(price)
 
     return bid_buckets, ask_buckets
 
@@ -97,7 +97,7 @@ def initHeatMap(symbol, orderBookSize):
         obJSON["bids"], obJSON["asks"], BUCKETSIZE)
     g_bothSides = max(middle - min(bidsDic), max(asksDic) - middle)
     g_priceLevels = g_bothSides * 2 + 1
-    g_maxColumns = 100
+    g_maxColumns = 10
     g_intervals = g_orderBookLimits[orderBookSize]
     g_initialMode = 'lines+markers'
     return middle - g_bothSides, middle + g_bothSides
