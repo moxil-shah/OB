@@ -31,7 +31,7 @@ table_ref = client.dataset(dataset_id).table(table_id)
 
 
 # Define the input parameters for the stored procedure
-bucket_size = 1000 * 60 * 60 * 1 # Example value, modify as needed
+bucket_size = 1000 * 60 # Example value, modify as needed
 start_time = 0  # Example value, modify as needed
 end_time = int(time.time() * 1000)  # current time
 

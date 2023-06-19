@@ -97,7 +97,7 @@ def initHeatMap(symbol, orderBookSize):
         obJSON["bids"], obJSON["asks"], BUCKETSIZE)
     g_bothSides = max(middle - min(bidsDic), max(asksDic) - middle)
     g_priceLevels = g_bothSides * 2 + 1
-    g_maxColumns = 10
+    g_maxColumns = 100
     g_intervals = g_orderBookLimits[orderBookSize]
     g_initialMode = 'lines+markers'
     return middle - g_bothSides, middle + g_bothSides
